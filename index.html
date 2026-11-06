@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Version: 2026.11.06_21.57（GitHub Pages 版） -->
+<!-- Version: 2026.11.07_04.54（GitHub Pages 版） -->
 <html>
 <head>
 <meta charset="utf-8">
@@ -83,7 +83,7 @@
   <div id="msg">載入中…</div>
   <div id="paneE"></div>
   <div id="paneS" style="display:none;"></div>
-  <div class="ver-foot">v2026.11.06-gh1 · <a href="#" onclick="logoutDevice(); return false;">登出這台裝置</a>（公用或借來的手機、電腦用完請按）</div>
+  <div class="ver-foot">v2026.11.07-gh2 · <a href="#" onclick="logoutDevice(); return false;">登出這台裝置</a>（公用或借來的手機、電腦用完請按）</div>
 </main>
 <div class="savebar" id="savebar"><span id="dirtyTxt"></span><button id="undoBtn">還原</button><button id="saveBtn" class="pri">儲存</button></div>
 
@@ -173,7 +173,7 @@ function startReauth() {
   if (REAUTH_BUSY || document.getElementById('deviceGate')) return;
   REAUTH_BUSY = true;
   // 2026.11.06：開頁不再先單獨檢查裝置，直接讀資料；第一次讀取就被擋（新裝置、驗證過期）→ 驗證後重新載入
-  if (!D) { deviceGate(() => { REAUTH_BUSY = false; load(''); }, false); return; }
+  if (!D || D.stale) { deviceGate(() => { REAUTH_BUSY = false; load(''); }, false); return; }
   deviceGate(() => { REAUTH_BUSY = false; flashNote('已重新驗證，請再操作一次。'); }, true);
 }
 function flashNote(text) {
@@ -188,7 +188,7 @@ function logoutDevice() {
   google.script.run
     .withSuccessHandler((r) => {
       if (!r || !r.ok) { alert((r && r.message) || '登出失敗'); return; }
-      try { localStorage.removeItem('deviceKey_v1'); localStorage.removeItem('accessToken_v1_' + ENV); } catch (e) { /* 無痕或封鎖時本來就沒存 */ }
+      try { localStorage.removeItem('deviceKey_v1'); localStorage.removeItem('accessToken_v1_' + ENV); localStorage.removeItem(VCACHE_KEY); } catch (e) { /* 無痕或封鎖時本來就沒存 */ }
       GATE_ON_PASS = null;
       showGate({ fatal: true, message: '已登出這台裝置。要再使用請重新整理頁面並完成驗證。' });
     })
@@ -292,7 +292,24 @@ function load(ym) {
   const seq = ++SEQ;
   $('msg').textContent = '載入中…';
   STATS = null;
-  const ok = (d) => { if (seq !== SEQ) return; $('msg').textContent = ''; setData(d); if (STATS) applyStats(STATS); };
+  if (!ym && !STAFF && !D) {
+    const c = cacheRead();
+    if (c) {
+      const v = JSON.parse(JSON.stringify(c.view));
+      v.stale = c.at;
+      setData(v);
+      if (c.stats && c.stats.code === v.code && c.stats.ym === v.ym) { CACHED_STATS = c.stats; applyStats(JSON.parse(JSON.stringify(c.stats))); }
+      $('msg').textContent = '';
+    }
+  }
+  const ok = (d) => {
+    if (seq !== SEQ) return;
+    $('msg').textContent = '';
+    setData(d);
+    cacheWrite(D_FRESH, null);
+    if (STATS) { applyStats(STATS); cacheWrite(D_FRESH, STATS); }
+    else if (CACHED_STATS && CACHED_STATS.code === d.code && CACHED_STATS.ym === d.ym) applyStats(JSON.parse(JSON.stringify(CACHED_STATS)));   // 新統計到了會覆蓋
+  };
   const fail = (e) => { if (seq !== SEQ) return; $('msg').textContent = '讀取失敗：' + errG(e); };
   if (STAFF) api().withSuccessHandler(ok).withFailureHandler(fail).getStaffEntry(STAFF, ym);
   else api().withSuccessHandler(ok).withFailureHandler(fail).getMyEntry(ym);
@@ -301,13 +318,36 @@ function load(ym) {
 function loadStats(ym, seq) {
   // 20 秒還沒回來：先顯示逾時訊息（之後若回來了照樣補上）
   setTimeout(() => { if (seq === SEQ && !STATS && !STATS_ERR) { STATS_ERR = '統計讀取逾時，請重新整理。'; if (D && !D.month) { renderSum(); renderS(); } } }, 20000);
-  const ok = (s) => { if (seq !== SEQ) return; STATS = s; STATS_ERR = ''; if (D && D.code === s.code && D.ym === s.ym) applyStats(s); };
+  const ok = (s) => { if (seq !== SEQ) return; STATS = s; STATS_ERR = ''; if (D && !D.stale && D.code === s.code && D.ym === s.ym) { applyStats(s); cacheWrite(D_FRESH, s); } };
   const fail = (e) => { if (seq !== SEQ) return; STATS_ERR = '統計讀取失敗：' + errG(e); if (D) { renderSum(); renderS(); } };
   STATS_ERR = '';
   if (STAFF) api().withSuccessHandler(ok).withFailureHandler(fail).getStaffEntryStats(STAFF, ym);
   else api().withSuccessHandler(ok).withFailureHandler(fail).getMyEntryStats(ym);
 }
 let STATS_ERR = '';
+// ---- 2026.11.07：手機先顯示上次的資料，再背景更新（只存本人、當月的畫面；登出時清除）----
+// 鍵帶權杖尾碼：同一支手機換別人的連結時，不會先顯示前一個人的資料；其他人留下的舊快取順便清掉
+const VCACHE_PREFIX = 'viewCache_v1_' + ENV + '_';
+const VCACHE_KEY = VCACHE_PREFIX + String(ACCESS_TOKEN || '').slice(-10);
+try { Object.keys(localStorage).forEach((k) => { if (k.indexOf('viewCache_v1_') === 0 && k !== VCACHE_KEY) localStorage.removeItem(k); }); } catch (e) { /* 無妨 */ }
+let CACHED_STATS = null;   // 先顯示的上次統計：新的畫面先回來、新的統計還沒到時，先沿用
+function nowYm() { const d = new Date(); return d.getFullYear() + '/' + String(d.getMonth() + 1).padStart(2, '0'); }
+function cacheRead() {
+  try {
+    const c = JSON.parse(localStorage.getItem(VCACHE_KEY) || 'null');
+    if (!c || !c.view || c.view.ym !== nowYm() || Date.now() - c.at > 7 * 86400000) return null;
+    return c;
+  } catch (e) { return null; }
+}
+function cacheWrite(view, stats) {
+  if (!view || view.readOnly || view.stale || STAFF || view.ym !== nowYm()) return;
+  try {
+    const old = cacheRead();
+    const keepStats = stats || (old && old.view.code === view.code ? old.stats : null);
+    localStorage.setItem(VCACHE_KEY, JSON.stringify({ at: Date.now(), view: view, stats: keepStats }));
+  } catch (e) { /* 空間不足或封鎖時就不存 */ }
+}
+function cacheClear() { try { localStorage.removeItem(VCACHE_KEY); } catch (e) { /* 無妨 */ } }
 /** 第二段到了：補上統計、特休、請假明細，並更新每天的請假標記（不重畫輸入欄，正在填的不受影響） */
 function applyStats(s) {
   ['month', 'year', 'balance', 'leaveDetail', 'lvErr'].forEach((k) => { D[k] = s[k]; });
@@ -326,7 +366,9 @@ function applyStats(s) {
   renderS();
 }
 
+let D_FRESH = null;   // 伺服器剛回傳、尚未被統計補值的畫面（存手機快取用）
 function setData(d) {
+  if (!d.stale) D_FRESH = JSON.parse(JSON.stringify(d));
   D = d;
   ORIG = {}; CUR = {};
   d.days.forEach((x) => { ORIG[x.ds] = Object.assign({}, x.vals); CUR[x.ds] = Object.assign({}, x.vals); });
@@ -408,6 +450,7 @@ function renderE() {
   const list = VIEW === 'today' ? D.days.filter((x) => x.ds <= D.today && x.ds >= addDays(D.today, -2)) : D.days;
   let h = '';
   if (D.readOnly) h += '<div class="ro">管理者檢視（唯讀）。員工本人開自己的連結才能填寫。</div>';
+  if (D.stale) { const t = new Date(D.stale); h += '<div class="ro">先顯示上次（' + (t.getMonth() + 1) + '/' + t.getDate() + ' ' + String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0') + '）的資料，正在更新，更新完才能修改…</div>'; }
   h += '<div id="lvNote">' + lvNoteHtml() + '</div>';
   if (D.ym === D.today.slice(0, 7)) {
     h += '<div class="seg"><button id="vT" class="' + (VIEW === 'today' ? 'on' : '') + '">最近 3 天</button><button id="vM" class="' + (VIEW === 'month' ? 'on' : '') + '">整個月</button></div>';
@@ -430,7 +473,7 @@ function addDays(ds, n) { const d = new Date(ds.replace(/\//g, '-') + 'T00:00:00
 function wdOf(ds) { return WD[new Date(ds.replace(/\//g, '-') + 'T00:00:00Z').getUTCDay()]; }
 
 function dayHtml(x) {
-  const id = x.ds.replace(/\//g, ''), v = CUR[x.ds], dis = x.locked || D.readOnly ? ' disabled' : '';
+  const id = x.ds.replace(/\//g, ''), v = CUR[x.ds], dis = x.locked || D.readOnly || D.stale ? ' disabled' : '';
   const cls = ['day'];
   if (x.cls) cls.push('hol');
   if (x.ds === D.today) cls.push('today');
@@ -532,7 +575,7 @@ function dirtyDays() { return D ? D.days.filter((x) => !x.locked && isDirty(x.ds
 
 function updateBar() {
   const n = dirtyDays().length;
-  $('savebar').classList.toggle('on', n > 0 && !D.readOnly);
+  $('savebar').classList.toggle('on', n > 0 && !D.readOnly && !D.stale);
   $('dirtyTxt').textContent = n + ' 天尚未儲存';
 }
 $('undoBtn').onclick = () => {
@@ -554,6 +597,7 @@ $('saveBtn').onclick = () => {
     // 沒存成功的日期：保留使用者輸入，讓他再改
     (r.errors || []).forEach((m) => { const ds = String(m).slice(0, 10); if (CUR[ds]) keep[ds] = CUR[ds]; });
     setData(r.view);
+    cacheWrite(D_FRESH, null);   // 存檔後的畫面也更新到手機快取
     const seq = ++SEQ; STATS = null; loadStats(D.ym, seq);
     Object.keys(keep).forEach((ds) => { if (CUR[ds]) CUR[ds] = keep[ds]; });
     if (Object.keys(keep).length) { renderE(); updateBar(); }
