@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Version: 2026.11.07_04.54（GitHub Pages 版） -->
+<!-- Version: 2026.11.07_09.11（GitHub Pages 版） -->
 <html>
 <head>
 <meta charset="utf-8">
@@ -83,7 +83,7 @@
   <div id="msg">載入中…</div>
   <div id="paneE"></div>
   <div id="paneS" style="display:none;"></div>
-  <div class="ver-foot">v2026.11.07-gh2 · <a href="#" onclick="logoutDevice(); return false;">登出這台裝置</a>（公用或借來的手機、電腦用完請按）</div>
+  <div class="ver-foot">v2026.11.07-gh3 · <a href="#" onclick="logoutDevice(); return false;">登出這台裝置</a>（公用或借來的手機、電腦用完請按）</div>
 </main>
 <div class="savebar" id="savebar"><span id="dirtyTxt"></span><button id="undoBtn">還原</button><button id="saveBtn" class="pri">儲存</button></div>
 
@@ -104,6 +104,21 @@ const ACCESS_TOKEN = (() => {
   return t;
 })();
 const USER_ROLE = '';
+// 2026.11.07：Google 帳號驗證回來時網址是 #g=票券；讀完就從網址列拿掉
+const LOGIN_URL = ((window.WT_CONFIG || {}).login || {})[ENV] || '';
+const G_TICKET = (() => {
+  const m = location.hash.match(/(?:^#|&)g=([A-Za-z0-9_.=-]{20,2000})/);
+  if (!m) return '';
+  try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* 無妨 */ }
+  return m[1];
+})();
+function startGoogleLogin() {
+  const b = new Uint8Array(18);
+  crypto.getRandomValues(b);
+  const n = btoa(String.fromCharCode.apply(null, b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  try { sessionStorage.setItem('gNonce_v1', n); } catch (e) { alert('這個瀏覽器不能暫存資料，請改用驗證碼。'); return; }
+  location.href = LOGIN_URL + '?e=' + ENV + '&n=' + n;
+}
 /** 取代 google.script.run：同樣的寫法（withSuccessHandler／withFailureHandler／函式名(參數)），改用 fetch 呼叫後端 doPost */
 function gsCall(fn, args) {
   if (!API_URL) return Promise.reject(new Error('網頁設定錯誤：找不到後端網址'));
@@ -232,6 +247,8 @@ function showGate(res) {
   }
   el.innerHTML = '<div style="' + box + '">'
     + '<h3 style="margin:0 0 12px;">' + escG(GATE_TITLES[res.reason] || GATE_TITLES.none) + '</h3>'
+    + (LOGIN_URL ? '<button id="gateGoogle" style="width:100%;padding:12px;font-size:16px;border:1px solid #1565c0;border-radius:8px;background:#fff;color:#1565c0;margin-bottom:12px;">用 Google 帳號驗證（免收驗證碼）</button>'
+      + '<p style="font-size:13px;color:#777;margin:0 0 16px;">需要這支手機的瀏覽器已登入你登記的 Gmail。不行的話用下面的驗證碼。</p>' : '')
     + '<p>驗證碼會寄到 <b>' + escG(res.emailMasked) + '</b>。' + escG(res.policy || '通過後這台裝置會被記住。') + '</p>'
     + '<button id="gateSend" style="width:100%;padding:12px;font-size:16px;border:0;border-radius:8px;background:#1565c0;color:#fff;">寄送驗證碼</button>'
     + '<div style="display:flex;gap:8px;margin-top:16px;">'
@@ -262,6 +279,8 @@ function showGate(res) {
       .authVerifyOtp(ACCESS_TOKEN, DEVICE_KEY, code);
   };
   codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') verifyBtn.click(); });
+  const gBtn = document.getElementById('gateGoogle');
+  if (gBtn) gBtn.onclick = () => { gBtn.disabled = true; startGoogleLogin(); };
   const later = document.getElementById('gateLater');
   if (later) later.onclick = () => { hideGate(); REAUTH_BUSY = false; };
 }
@@ -281,6 +300,21 @@ let BUSY = false;
 
 window.onload = () => {
   if (!ACCESS_TOKEN) { $('msg').textContent = '請用管理者發給你的專屬連結開啟（連結裡含有你的通行碼）。'; return; }
+  if (G_TICKET) {
+    let n = '';
+    try { n = sessionStorage.getItem('gNonce_v1') || ''; sessionStorage.removeItem('gNonce_v1'); } catch (e) { /* 無妨 */ }
+    showGate({ checking: true });
+    google.script.run
+      .withSuccessHandler((r) => {
+        hideGate();
+        if (r && r.ok) flashNote('Google 帳號驗證完成，這台裝置已記住。');
+        else alert((r && r.message) || 'Google 驗證失敗，請改用驗證碼。');
+        load('');
+      })
+      .withFailureHandler((e) => { hideGate(); alert('Google 驗證失敗：' + errG(e)); load(''); })
+      .authGoogleVerify(ACCESS_TOKEN, DEVICE_KEY, G_TICKET, n);
+    return;
+  }
   load('');
 };   // 裝置未驗證時，讀取會被擋下並自動叫出驗證畫面（startReauth）
 window.addEventListener('beforeunload', (e) => { if (dirtyDays().length) { e.preventDefault(); e.returnValue = ''; } });
